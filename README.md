@@ -32,3 +32,33 @@ własnym `Dockerfile`. Komunikuje się wyłącznie z shop-gateway.
 ## Konfiguracja
 `VITE_API_BASE_URL=/api` (resztą zajmuje się proxy nginx). Dostęp:
 http://localhost:3000.
+
+## High Level Design (ogólny workflow)
+
+SPA (React) serwowane przez nginx, który proxuje `/api` do gatewaya (jeden origin,
+brak CORS). Zakup jest asynchroniczny: po `POST /api/orders` UI odpytuje status
+zamówienia aż do stanu terminalnego.
+
+```mermaid
+flowchart LR
+    USER(("kupujący")) --> UI["shop-ui (React SPA)"]
+    UI --> NGINX["nginx: statyki + proxy /api"]
+    NGINX -->|"/api/**"| GW["shop-gateway"]
+```
+
+## Low Level Design (diagram aktywności)
+
+Proces zakupu:
+
+```mermaid
+flowchart TD
+    A(["klik Kup"]) --> B["zablokuj przycisk"]
+    B --> C["POST /api/orders + Idempotency-Key (UUID)"]
+    C --> D["odbierz orderId"]
+    D --> E["poll GET /api/orders/{id}"]
+    E --> F{"status?"}
+    F -- "PENDING/RESERVED" --> E
+    F -- CONFIRMED --> G(["sukces zakupu"])
+    F -- REJECTED --> H(["brak towaru"])
+    F -- CANCELLED --> I(["płatność nieudana"])
+```
