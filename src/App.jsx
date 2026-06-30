@@ -12,11 +12,21 @@ const STATUS_LABEL = {
   ERROR: '⚠️ Błąd zamówienia',
 };
 
+const USERS = [
+  { id: 'user-a', label: 'Użytkownik A (10% marży)', margin: 0.10 },
+  { id: 'user-b', label: 'Użytkownik B (50% marży)', margin: 0.50 },
+];
+
+function applyMargin(price, margin) {
+  return (price * (1 + margin)).toFixed(2);
+}
+
 export default function App() {
   const [products, setProducts] = useState([]);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null); // product being purchased (button lock)
   const [order, setOrder] = useState(null); // { orderId, productId, status }
+  const [user, setUser] = useState(USERS[0]);
 
   useEffect(() => {
     fetch(`${API}/products?size=50`)
@@ -36,7 +46,7 @@ export default function App() {
       const res = await fetch(`${API}/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-        body: JSON.stringify({ productId: String(product.id), quantity: 1 }),
+        body: JSON.stringify({ productId: String(product.id), quantity: 1, userId: user.id }),
       });
       const created = await res.json();
       setOrder({ orderId: created.orderId, productId: product.id, status: created.status ?? 'PENDING' });
@@ -64,9 +74,21 @@ export default function App() {
     }, 1000);
   }
 
+  function switchUser() {
+    setUser((prev) => (prev.id === USERS[0].id ? USERS[1] : USERS[0]));
+  }
+
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 720, margin: '0 auto', padding: '2rem' }}>
       <h1>shop — flash sale</h1>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', margin: '1rem 0' }}>
+        <span>Zalogowany jako: <strong>{user.label}</strong></span>
+        <button onClick={switchUser} disabled={busyId !== null}>
+          Przełącz użytkownika
+        </button>
+      </div>
+
       {error && <p style={{ color: 'crimson' }}>{error}</p>}
 
       {order && (
@@ -86,7 +108,16 @@ export default function App() {
               <strong>{p.name}</strong>
               {p.description ? <em style={{ color: '#6b7280' }}> — {p.description}</em> : null}
             </span>
-            <span style={{ width: 90, textAlign: 'right' }}>{p.price} zł</span>
+            <span style={{ width: 120, textAlign: 'right' }}>
+              {user.margin > 0 ? (
+                <>
+                  <span style={{ textDecoration: 'line-through', color: '#9ca3af', marginRight: 6 }}>{p.price} zł</span>
+                  {applyMargin(p.price, user.margin)} zł
+                </>
+              ) : (
+                <>{p.price} zł</>
+              )}
+            </span>
             <button onClick={() => buy(p)} disabled={busyId !== null}>
               {busyId === p.id ? 'Kupowanie…' : 'Kup'}
             </button>
