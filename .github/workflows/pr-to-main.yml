@@ -1,0 +1,34 @@
+name: PR to main (build gate)
+
+# shop-ui to frontend React/Vite — nie używa Gradle, więc NIE korzysta ze
+# współdzielonej bramki preprod (shop-acceptance-tests/gate.yml jest
+# Java-specyficzna: gradlew.bat + podman build + deploy kind-preprod).
+#
+# Tu pilnujemy minimum, którego brakowało: że frontend instaluje zależności,
+# buduje się produkcyjnie (vite) i że obraz kontenera daje się zbudować. Bez
+# tego PR-y do shop-ui trafiały na main bez żadnej weryfikacji.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Production build (vite)
+        run: npm run build
+
+      - name: Validate container image builds
+        run: docker build -t "shop-ui:pr-${{ github.event.pull_request.number }}" .
