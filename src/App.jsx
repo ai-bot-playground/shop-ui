@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 
 const API = '/api';
 const TERMINAL = ['CONFIRMED', 'REJECTED', 'CANCELLED'];
-const USER_ID_KEY = 'shop-user-id';
 
 const STATUS_LABEL = {
   PENDING: 'Przetwarzanie…',
@@ -13,50 +12,75 @@ const STATUS_LABEL = {
   ERROR: '⚠️ Błąd zamówienia',
 };
 
-function getUserId() {
-  return localStorage.getItem(USER_ID_KEY);
-}
-
-function setUserId(id) {
-  localStorage.setItem(USER_ID_KEY, id);
-}
-
-function clearUserId() {
-  localStorage.removeItem(USER_ID_KEY);
-}
-
-function authHeaders(extra = {}) {
-  const userId = getUserId();
-  const headers = { ...extra };
-  if (userId) {
-    headers['X-User-Id'] = userId;
-  }
-  return headers;
-}
-
 export default function App() {
   const [products, setProducts] = useState([]);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null); // product being purchased (button lock)
   const [order, setOrder] = useState(null); // { orderId, productId, status }
-  const [userId, setUserIdState] = useState(getUserId());
+  const [user, setUser] = useState(null); // { username } or null
+  const [loginName, setLoginName] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
 
-  useEffect(() => {
-    fetch(`${API}/products?size=50`, { headers: authHeaders() })
-      .then((r) => r.json())
-      .then((d) => setProducts(d.content ?? []))
-      .catch(() => setError('Nie udało się pobrać produktów.'));
-  }, [userId]);
-
-  function login() {
-    const id = crypto.randomUUID();
-    setUserId(id);
-    setUserIdState(id);
+  async function loadProducts() {
+    try {
+      const r = await fetch(`${API}/products?size=50`, { credentials: 'include' });
+      const d = await r.json();
+      setProducts(d.content ?? []);
+      setError(null);
+    } catch {
+      setError('Nie udało się pobrać produktów.');
+    }
   }
 
-  function logout() {
-    clearUserId();
-    setUserIdState(null);
+  async function checkSession() {
+    try {
+      const r = await fetch(`${API}/session`, { credentials: 'include' });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.username) setUser({ username: d.username });
+      }
+    } catch {
+      // ignore — not logged in
+    }
+  }
+
+  useEffect(() => {
+    checkSession().then(() => loadProducts());
+  }, []);
+
+  async function login(e) {
+    e.preventDefault();
+    const username = loginName.trim();
+    if (!username || loginBusy) return;
+    setLoginBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ username }),
+      });
+      if (!res.ok) throw new Error('Login failed');
+      const d = await res.json();
+      setUser({ username: d.username ?? username });
+      setLoginName('');
+      await loadProducts();
+    } catch {
+      setError('Nie udało się zalogować.');
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function logout() {
+    try {
+      await fetch(`${API}/logout`, { method: 'POST', credentials: 'include' });
+    } catch {
+      // ignore
+    }
+    setUser(null);
+    await loadProducts();
   }
 
   async function buy(product) {
@@ -69,7 +93,8 @@ export default function App() {
     try {
       const res = await fetch(`${API}/orders`, {
         method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }),
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+        credentials: 'include',
         body: JSON.stringify({ productId: String(product.id), quantity: 1 }),
       });
       const created = await res.json();
@@ -84,7 +109,7 @@ export default function App() {
   function pollStatus(orderId, productId) {
     const timer = setInterval(async () => {
       try {
-        const r = await fetch(`${API}/orders/${orderId}`, { headers: authHeaders() });
+        const r = await fetch(`${API}/orders/${orderId}`, { credentials: 'include' });
         const o = await r.json();
         setOrder({ orderId, productId, status: o.status });
         if (TERMINAL.includes(o.status)) {
@@ -100,19 +125,35 @@ export default function App() {
 
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 720, margin: '0 auto', padding: '2rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-        <h1 style={{ margin: 0 }}>shop — flash sale</h1>
-        {userId ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <span style={{ fontSize: '0.85rem', color: '#6b7280' }}>
-              Zalogowany: {userId.slice(0, 8)}
+      <h1>shop — flash sale</h1>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+        {user ? (
+          <>
+            <span style={{ color: '#374151' }}>
+              Zalogowany: <strong>{user.username}</strong>
             </span>
-            <button onClick={logout}>Wyloguj</button>
-          </div>
+            <button onClick={logout} style={{ marginLeft: '0.5rem' }}>
+              Wyloguj
+            </button>
+          </>
         ) : (
-          <button onClick={login}>Zaloguj</button>
+          <form onSubmit={login} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <input
+              type="text"
+              placeholder="Nazwa użytkownika"
+              value={loginName}
+              onChange={(e) => setLoginName(e.target.value)}
+              disabled={loginBusy}
+              style={{ padding: '0.35rem 0.5rem', borderRadius: 4, border: '1px solid #d1d5db' }}
+            />
+            <button type="submit" disabled={loginBusy || !loginName.trim()}>
+              {loginBusy ? 'Logowanie…' : 'Zaloguj'}
+            </button>
+          </form>
         )}
       </div>
+
       {error && <p style={{ color: 'crimson' }}>{error}</p>}
 
       {order && (
@@ -133,7 +174,7 @@ export default function App() {
               {p.description ? <em style={{ color: '#6b7280' }}> — {p.description}</em> : null}
             </span>
             <span style={{ width: 90, textAlign: 'right' }}>{p.price} zł</span>
-            <button onClick={() => buy(p)} disabled={busyId !== null || !userId} title={!userId ? 'Zaloguj się, aby kupować' : ''}>
+            <button onClick={() => buy(p)} disabled={busyId !== null}>
               {busyId === p.id ? 'Kupowanie…' : 'Kup'}
             </button>
           </li>
