@@ -1,34 +1,133 @@
-name: PR to main (build gate)
+name: ui-preprod-gate
 
-# shop-ui to frontend React/Vite — nie używa Gradle, więc NIE korzysta ze
-# współdzielonej bramki preprod (shop-acceptance-tests/gate.yml jest
-# Java-specyficzna: gradlew.bat + podman build + deploy kind-preprod).
+# shop-ui to frontend React/Vite (nie-Gradle), wiec NIE korzysta ze wspoldzielonej
+# reusable gate.yml z shop-acceptance-tests (ta jest Java-specyficzna: gradlew +
+# cross-service acceptance suite). Zamiast tego uruchamiamy analogiczna bramke na
+# WLASNYM self-hosted runnerze [self-hosted, shop-ui]:
+#   npm ci + vite build  ->  podman build obrazu  ->  kind load  ->
+#   helm upgrade (ten sam umbrella chart, services.shop-ui.image)  ->
+#   rollout status deployment/shop-ui  ->  smoke-test wdrozonego UI.
+# PR mergeowalny dopiero gdy zielone (branch protection -> required status check
+# "ui-preprod-gate / gate").
 #
-# Tu pilnujemy minimum, którego brakowało: że frontend instaluje zależności,
-# buduje się produkcyjnie (vite) i że obraz kontenera daje się zbudować. Bez
-# tego PR-y do shop-ui trafiały na main bez żadnej weryfikacji.
+# Kroki uzywaja PowerShell: na Windowsowym self-hosted runnerze `shell: bash` to
+# launcher WSL, gdzie podman/kubectl/helm i kubeconfig sa niedostepne.
+
 on:
   pull_request:
     branches: [main]
 
+# Ta sama grupa co bramki Java + machine-local mutex ponizej: shop-ui dzieli TEN
+# SAM klaster kind-preprod i release helm `shop`, wiec cluster-touching kroki musza
+# byc serializowane wzgledem pozostalych bramek. GitHub `concurrency` jest repo-
+# scoped (serializuje tylko wlasne runy), cross-repo serializacje daje mutex.
+concurrency:
+  group: preprod-gate
+  cancel-in-progress: false
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  gate:
+    runs-on: [self-hosted, shop-ui]
+    defaults:
+      run:
+        shell: powershell
+    env:
+      KIND_EXPERIMENTAL_PROVIDER: podman
+      CTX: kind-preprod
+      NS: shop
+      SVC: shop-ui
+      TAG: pr-${{ github.event.pull_request.number }}
     steps:
-      - name: Checkout
+      - name: Checkout candidate (shop-ui)
         uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Checkout Helm chart (shop-infra)
+        uses: actions/checkout@v4
+        with:
+          repository: ai-bot-playground/shop-infra
+          ref: main
+          path: infra
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
 
-      - name: Install dependencies (npm ci)
-        run: npm ci
+      # Build stage first: fail the gate before any image build / deploy if the
+      # frontend does not install (npm ci) or the production vite build breaks.
+      - name: Frontend build (npm ci + vite)
+        run: |
+          Set-Location candidate
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { throw "vite build failed" }
 
-      - name: Production build (vite)
-        run: npm run build
+      - name: Build candidate image
+        run: |
+          $img = "localhost/$($env:SVC):$($env:TAG)"
+          podman build -t $img candidate
+          if ($LASTEXITCODE -ne 0) { throw "podman build failed" }
 
-      - name: Validate container image builds
-        run: docker build -t "shop-ui:pr-${{ github.event.pull_request.number }}" .
+      # Cluster-touching section, guarded by the SAME machine-local mutex as the
+      # Java gates: all repos share ONE kind-preprod cluster + one helm release
+      # `shop`, and GitHub concurrency does not serialize across repos. Only one
+      # gate at a time runs load -> helm upgrade -> rollout -> smoke; the mutex
+      # auto-releases if a holding run crashes (AbandonedMutexException).
+      - name: Deploy candidate & smoke-test (preprod, mutex-guarded)
+        run: |
+          $mutex = New-Object System.Threading.Mutex($false, "Global\shop-preprod-gate")
+          $haveLock = $false
+          try {
+            Write-Host "Waiting for the shared preprod-gate lock..."
+            try { $haveLock = $mutex.WaitOne([TimeSpan]::FromMinutes(60)) } catch [System.Threading.AbandonedMutexException] { $haveLock = $true }
+            if (-not $haveLock) { throw "timed out (60 min) waiting for the preprod-gate lock - another repo's gate is holding the shared kind-preprod cluster" }
+            Write-Host "Acquired preprod-gate lock; this gate now owns the shared cluster."
+
+            $img = "localhost/$($env:SVC):$($env:TAG)"
+
+            # Load the candidate image into the kind node.
+            podman save -o image.tar $img
+            if ($LASTEXITCODE -ne 0) { throw "podman save failed" }
+            kind load image-archive image.tar --name preprod
+            if ($LASTEXITCODE -ne 0) { throw "kind load failed" }
+
+            # One helm operation deploys the baseline stack AND the shop-ui candidate
+            # image (Helm 4 server-side apply); --force-conflicts reclaims fields a
+            # previous run's kubectl/gate grabbed, avoiding SSA ownership conflicts.
+            helm upgrade --install shop infra/helm --kube-context $env:CTX -n $env:NS --create-namespace -f infra/helm/values.yaml -f infra/helm/values-preprod.yaml --set-string "services.$($env:SVC).image=$img" --force-conflicts --timeout 6m
+            if ($LASTEXITCODE -ne 0) { throw "helm upgrade failed" }
+            kubectl --context $env:CTX -n $env:NS rollout status "deployment/$($env:SVC)" --timeout=180s
+            if ($LASTEXITCODE -ne 0) { throw "rollout failed" }
+
+            # Smoke test: the freshly deployed nginx must serve the built SPA on "/".
+            $ctx = $env:CTX; $ns = $env:NS
+            $pf = Start-Job { kubectl --context $using:ctx -n $using:ns port-forward svc/shop-ui 8080:80 }
+            try {
+              $ok = $false
+              foreach ($i in 1..30) {
+                Start-Sleep -Seconds 2
+                try {
+                  $r = Invoke-WebRequest "http://localhost:8080/" -UseBasicParsing -TimeoutSec 3
+                  if ($r.StatusCode -eq 200 -and $r.Content -match 'id="root"') { $ok = $true; break }
+                } catch {}
+              }
+              if (-not $ok) { throw "shop-ui nie serwuje SPA na localhost:8080 (brak 200 lub brak #root w HTML)" }
+              Write-Host "Smoke test OK: shop-ui serwuje zbudowany SPA."
+            } finally {
+              Stop-Job $pf -ErrorAction SilentlyContinue
+              Remove-Job $pf -ErrorAction SilentlyContinue
+            }
+          } finally {
+            if ($haveLock) { try { $mutex.ReleaseMutex() } catch {}; Write-Host "Released preprod-gate lock." }
+            $mutex.Dispose()
+          }
+
+      - name: Cleanup candidate artifacts
+        if: always()
+        run: |
+          Remove-Item -Force image.tar -ErrorAction SilentlyContinue
+          podman rmi "localhost/$($env:SVC):$($env:TAG)" 2>$null
+          exit 0
