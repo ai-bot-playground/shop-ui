@@ -1,43 +1,30 @@
 # shop-ui
 
-Frontend — interfejs kupującego (React + Vite). Serwowany jako statyczny build
-przez nginx, który również proxuje ruch API do shop-gateway. Standalone repo z
-własnym `Dockerfile`. Komunikuje się wyłącznie z shop-gateway.
+Frontend zakupów (React 19 + Vite). Serwowany jako statyczny build przez nginx,
+który proxuje `/api` do shop-gateway.
 
-## Widoki do zaimplementowania
+## Widoki
 
-- Lista produktów (`GET /api/products`).
-- Szczegóły produktu z **licznikiem dostępnych sztuk na żywo** — przy flash sale
-  stan zmienia się co chwilę (WebSocket lub SSE, fallback: polling).
-- Proces zakupu: `POST /api/orders` z nagłówkiem `Idempotency-Key` (UUID
-  generowany po stronie klienta, ten sam przy ponowieniu).
-- Status zamówienia na żywo: `PENDING → RESERVED → CONFIRMED` albo
-  `REJECTED / CANCELLED` (SSE lub polling `GET /api/orders/{id}`).
+- **Lista produktów** — `GET /api/products`
+- **Zakup** — `POST /api/orders` z nagłówkiem `Idempotency-Key` (UUID po stronie klienta); przycisk blokowany do zakończenia
+- **Status zamówienia** — polling `GET /api/orders/{id}` co 1s; stany: `PENDING → RESERVED → CONFIRMED | REJECTED | CANCELLED`
 
-## UX pod flash sale
-- Po kliknięciu „Kup" zablokuj przycisk i pokaż stan przetwarzania — saga jest
-  asynchroniczna, odpowiedź przychodzi po chwili.
-- Czytelnie obsłuż „brak towaru" (REJECTED) i „płatność nieudana" (CANCELLED).
-- Nie pozwalaj na wielokrotne wysłanie tego samego zamówienia (idempotency key +
-  blokada UI).
+## Uruchomienie
 
-## Build i serwowanie (Dockerfile, multi-stage)
-1. Etap build: `node` → `npm ci && npm run build` (Vite generuje statyki).
-2. Etap runtime: `nginx:alpine`, build do `/usr/share/nginx/html`.
-3. nginx:
-   - `try_files ... /index.html` — fallback dla routingu SPA.
-   - `location /api/ { proxy_pass http://shop-gateway:8080/; }` — proxy do
-     shop-gateway w sieci `backend` (jeden origin dla przeglądarki, brak CORS).
+```bash
+npm run dev      # dev server; proxy /api → http://localhost:8080
+npm run build    # statyki do dist/
+```
 
-## Konfiguracja
-`VITE_API_BASE_URL=/api` (resztą zajmuje się proxy nginx). Dostęp:
-http://localhost:3000.
+## Deploy (Docker, multi-stage)
 
-## High Level Design (ogólny workflow)
+1. Etap build: `node` → `npm ci && npm run build`
+2. Etap runtime: `nginx:alpine` — pliki do `/usr/share/nginx/html`
+3. nginx: SPA fallback (`try_files … /index.html`) + proxy `/api/` → `http://shop-gateway:8080`
 
-SPA (React) serwowane przez nginx, który proxuje `/api` do gatewaya (jeden origin,
-brak CORS). Zakup jest asynchroniczny: po `POST /api/orders` UI odpytuje status
-zamówienia aż do stanu terminalnego.
+Dostęp: http://localhost:3000
+
+## Architektura
 
 ```mermaid
 flowchart LR
@@ -46,19 +33,17 @@ flowchart LR
     NGINX -->|"/api/**"| GW["shop-gateway"]
 ```
 
-## Low Level Design (diagram aktywności)
-
 Proces zakupu:
 
 ```mermaid
 flowchart TD
     A(["klik Kup"]) --> B["zablokuj przycisk"]
-    B --> C["POST /api/orders + Idempotency-Key (UUID)"]
+    B --> C["POST /api/orders + Idempotency-Key"]
     C --> D["odbierz orderId"]
-    D --> E["poll GET /api/orders/{id}"]
+    D --> E["poll GET /api/orders/{id} co 1s"]
     E --> F{"status?"}
     F -- "PENDING/RESERVED" --> E
-    F -- CONFIRMED --> G(["sukces zakupu"])
+    F -- CONFIRMED --> G(["sukces"])
     F -- REJECTED --> H(["brak towaru"])
     F -- CANCELLED --> I(["płatność nieudana"])
 ```
