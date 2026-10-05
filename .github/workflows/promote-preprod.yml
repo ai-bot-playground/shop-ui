@@ -1,0 +1,14 @@
+name: preprod promote
+
+# Po merge'u do main: odbuduj obraz bazowy tego serwisu (localhost/shop-ui:0.0.1) z main
+# i wdroz go na kind-preprod. Bez tego kazda kolejna bramka (helm z obrazami bazowymi)
+# cofala zmergowana zmiane z preprod - patrz shop-acceptance-tests/.github/workflows/promote.yml.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  promote:
+    uses: ai-bot-playground/shop-acceptance-tests/.github/workflows/promote.yml@main
+    with:
+      service: shop-ui
