@@ -114,6 +114,9 @@ export default function App() {
         )}
       </div>
       {error && <p style={{ color: 'crimson' }}>{error}</p>}
+      {!userId && (
+        <p data-testid="login-hint" style={{ color: '#6b7280' }}>Zaloguj się, aby kupować.</p>
+      )}
 
       {order && (
         <div style={{ padding: '0.75rem 1rem', margin: '1rem 0', background: '#f3f4f6', borderRadius: 8 }}>
